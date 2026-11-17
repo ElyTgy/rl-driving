@@ -1,0 +1,34 @@
+# Sim config for testing the BC model on the ims_small oval (2 m wide track).
+# Launch with:  ros2 launch f1tenth_gym_ros gym_bridge_launch.py config:=$PWD/ros/sim_ims_small.yaml
+#
+# Only the settings that matter for the BC model are listed; everything else uses the
+# bridge's defaults (see f1tenth_gym_ros/config/sim.yaml for the full list).
+
+bridge:
+  ros__parameters:
+    # LiDAR: must match the real car, because the model's input is built from 1081 beams
+    # over -135..+135 deg (0.25 deg apart) with a 30 m maximum range.
+    # (The default sim.yaml uses 819 beams and 25 m, which the model cannot use.)
+    scan_num_beams: 1081
+    scan_angle_min: -135.0
+    scan_angle_max: 135.0
+    scan_range_min: 0.02
+    scan_range_max: 30.0
+    lidar_noise_std: 0.01      # m
+
+    map_path: 'maps/ims_small'
+    scale: 1.0
+    vehicle_params: 'f1tenth'
+    num_agent: 1
+
+    # Start on the bottom straight, heading +x: the car drives counterclockwise, so the
+    # wall on its right (the one the expert followed) is the outer wall.
+    # For the other direction use stheta: 3.14159; then the right wall is the inner wall.
+    sx: 0.0
+    sy: -4.0
+    stheta: 0.0
+
+    # Off, so the keyboard teleop topic (/cmd_vel) cannot override the model's steering.
+    kb_teleop: False
+    use_sim_time: False
+    async_mode: True           # the sim runs in real time on its own timer

@@ -3,7 +3,8 @@
 The network maps an observation from `preprocess.make_observation` (OBS_DIM numbers) to one
 normalised steering value (use `preprocess.action_to_steer` to get radians).
 It is a plain MLP with tanh hidden layers, the same shape SB3's PPO actor uses with
-net_arch=[256, 256] and activation_fn=nn.Tanh, so the weights can be copied into PPO later.
+net_arch=list(HIDDEN) and activation_fn=nn.Tanh, so the weights can be copied into PPO later
+(PPO's net_arch must match the HIDDEN the model was trained with).
 """
 import copy
 
@@ -11,9 +12,14 @@ import numpy as np
 import torch
 from torch import nn
 
-from .preprocess import OBS_DIM, PREPROC_VERSION
+from .preprocess import OBS_DIM, PREPROC_VERSION #OBS_DIM is the dimension of data fed to the network which is 2*N_BINS(108 after reducing lidar) +2 for speed and yaw_rate
 
-HIDDEN = (256, 256)
+# Hidden layer sizes. 2x64 is SB3's PPO default and is plenty for the wall_follow data:
+# a linear ridge baseline already reaches the label-noise floor (~0.022 rad), so extra
+# capacity only adds overfitting risk with ~5k samples.
+# TODO: when there is more data (cv-nav expert, ~20k samples), try (256, 256) and compare
+# on the same folds. Keep whichever is chosen in sync with PPO's net_arch.
+HIDDEN = (64, 64)
 
 
 class SteeringMLP(nn.Module):
