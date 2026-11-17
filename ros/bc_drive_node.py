@@ -3,26 +3,34 @@
 
 Every control period (26 ms, the real lidar's scan period) it:
     1. takes the newest lidar scan and the scan from the previous control step,
-    2. takes the forward speed and yaw rate from odometry,
+    2. takes the forward speed and yaw rate (from odometry in the sim, odometry + IMU on the car),
     3. builds the observation with rl_driving.preprocess.make_observation (the same function
        used to build the training data, so the network sees exactly what it was trained on),
     4. runs the MLP to get a steering angle,
-    5. publishes the steering angle with a fixed speed on /drive.
+    5. publishes the steering angle with a fixed speed.
 
 Speed is fixed (1.0 m/s by default) because the expert drove at a fixed 1.0 m/s, so the model
 only learned steering.
 
-Why a timer instead of reacting to every scan: the sim publishes scans every 4 ms (repeating the
-same scan between physics steps), but the model was trained on pairs of scans ~26 ms apart. The
-timer makes "previous scan" mean the same thing as in the training data.
+Why a timer instead of reacting to every scan: the model was trained on pairs of scans ~26 ms
+apart. The sim publishes scans every 4 ms (repeating the same scan between physics steps), and the
+timer keeps "previous scan" meaning the same thing on the sim and the car.
 
-Currently written for the simulator (f1tenth_gym_ros). On the real car the odometry is
-sign-flipped and the IMU yaw rate is in deg/s (see CLAUDE.md), so the speed and yaw-rate inputs
-would need converting first.
+Modes (parameter `mode`):
+    sim  odometry on /ego_racecar/odom with standard signs; yaw rate from odometry (no IMU in the sim)
+    car  odometry on /odom, sign-flipped; yaw rate from the IMU on /sensors/imu/raw, in deg/s.
+         Converted with rl_driving.car_signals, the same functions the training data went through.
 
-Run it with the ROS Python (sim_ws/.venv), not the project venv; see ros/README.md:
-    python3 ros/bc_drive_node.py
-    python3 ros/bc_drive_node.py --ros-args -p speed:=1.0 -p policy_path:=/abs/path/model.npz
+Where the commands go (parameter `drive_topic`):
+    The car must be driven through the drive_arbiter, which is what applies the AEB: once the
+    safety node fires, the arbiter only forwards stop commands. ros/bc_drive_launch.py starts the
+    safety node and arbiter and points this node at /wall_follow_drive (an arbiter input). In car
+    mode the node refuses to publish straight to /drive, because that would bypass the AEB.
+    Publishing to /drive is only allowed in the sim, for quick tests without the arbiter.
+
+Run it with the ROS Python, not the project venv (see ros/README.md):
+    ros2 launch ros/bc_drive_launch.py mode:=car          # car: safety node + arbiter + this node
+    python3 ros/bc_drive_node.py                         # sim only, straight to /drive
 """
 import math
 import os
@@ -33,75 +41,108 @@ import rclpy
 from ackermann_msgs.msg import AckermannDriveStamped
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 from rclpy.signals import SignalHandlerOptions
-from sensor_msgs.msg import LaserScan
+from sensor_msgs.msg import Imu, LaserScan
 from std_msgs.msg import Bool
 
 # The rl_driving package is installed in the project venv, not in the ROS Python, so import it
 # straight from this repo's src/ folder. It only needs numpy.
 REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO_DIR, 'src'))
+from rl_driving.car_signals import speed_from_car_odom, yaw_rate_from_car_imu  # noqa: E402
 from rl_driving.numpy_policy import NumpyPolicy                                # noqa: E402
 from rl_driving.preprocess import N_BEAMS, action_to_steer, make_observation   # noqa: E402
 
 DEFAULT_POLICY = os.path.join(REPO_DIR, 'checkpoints', 'bc_v1.npz')
+
+# Topics that differ between the simulator and the real car.
+TOPICS = {
+    'sim': {'odom': '/ego_racecar/odom', 'imu': None, 'collision': '/ego_racecar/collision'},
+    'car': {'odom': '/odom', 'imu': '/sensors/imu/raw', 'collision': None},
+}
 
 
 class BCDriveNode(Node):
 
     def __init__(self):
         super().__init__('bc_drive')
+        self.declare_parameter('mode', 'sim')                # 'sim' or 'car', see the module docstring
         self.declare_parameter('policy_path', DEFAULT_POLICY)
         self.declare_parameter('speed', 1.0)                 # m/s, what the expert drove at
         self.declare_parameter('control_period', 0.026)      # s, the real lidar's scan period
         self.declare_parameter('status_period', 2.0)         # s between status log lines
         self.declare_parameter('scan_topic', '/scan')
-        self.declare_parameter('odom_topic', '/ego_racecar/odom')
-        self.declare_parameter('drive_topic', '/drive')
-        self.declare_parameter('collision_topic', '/ego_racecar/collision')
+        self.declare_parameter('drive_topic', '/drive')      # the launch file sets an arbiter input
+
+        self.mode = self.get_parameter('mode').value
+        if self.mode not in TOPICS:
+            raise ValueError(f"mode must be 'sim' or 'car', got {self.mode!r}")
+        topics = TOPICS[self.mode]
+        drive_topic = self.get_parameter('drive_topic').value
+        if self.mode == 'car' and drive_topic.lstrip('/') == 'drive':
+            raise ValueError('on the car, publishing straight to /drive would bypass the drive_arbiter '
+                             'and with it the AEB. Start the node with ros/bc_drive_launch.py instead.')
 
         policy_path = self.get_parameter('policy_path').value
         self.policy = NumpyPolicy.load(policy_path)
         self.speed = float(self.get_parameter('speed').value)
-        self.get_logger().info(f'loaded policy {policy_path}, driving at {self.speed} m/s')
+        self.get_logger().info(f'mode {self.mode}: loaded {policy_path}, driving at {self.speed} m/s, '
+                               f'commands on {drive_topic}')
 
         # Latest sensor values, written by the callbacks and read by the control loop.
         self.scan = None              # newest scan, (N_BEAMS,) in m
         self.prev_scan = None         # the scan used at the previous control step
-        self.forward_speed = None     # m/s
-        self.yaw_rate = None          # rad/s, positive = turning left
+        self.forward_speed = None     # m/s, positive driving forward
+        self.yaw_rate = None          # rad/s, positive turning left
         self.position = None          # (x, y) in m, only used for the status line
 
         # Numbers for the status line.
         self.distance_driven = 0.0
         self.collisions = 0
         self.in_collision = False
+        self.aeb_seen = False
         self.steer = 0.0
 
         self.create_subscription(LaserScan, self.get_parameter('scan_topic').value, self.on_scan, 10)
-        self.create_subscription(Odometry, self.get_parameter('odom_topic').value, self.on_odom, 10)
-        self.create_subscription(Bool, self.get_parameter('collision_topic').value, self.on_collision, 10)
-        self.drive_pub = self.create_publisher(AckermannDriveStamped, self.get_parameter('drive_topic').value, 10)
+        self.create_subscription(Odometry, topics['odom'], self.on_odom, 10)
+        if topics['imu']:
+            # Same QoS as the data recorder used for the IMU.
+            self.create_subscription(Imu, topics['imu'], self.on_imu, qos_profile_sensor_data)
+        if topics['collision']:
+            self.create_subscription(Bool, topics['collision'], self.on_collision, 10)
+        # Only to report it in the log; the arbiter is what actually stops the car.
+        self.create_subscription(AckermannDriveStamped, '/safety_drive', self.on_safety_drive, 10)
+
+        self.drive_pub = self.create_publisher(AckermannDriveStamped, drive_topic, 10)
         self.create_timer(self.get_parameter('control_period').value, self.control_step)
         self.create_timer(self.get_parameter('status_period').value, self.log_status)
 
-    # ----- sensor callbacks: only store the data -----
+    # ----- sensor callbacks: convert to the model's units and store -----
 
     def on_scan(self, msg):
         if len(msg.ranges) != N_BEAMS:
             self.get_logger().error(
                 f'scan has {len(msg.ranges)} beams but the model needs {N_BEAMS} '
-                '(set scan_num_beams: 1081 in the sim config)', throttle_duration_sec=5.0)
+                '(in the sim, set scan_num_beams: 1081 in the sim config)', throttle_duration_sec=5.0)
             return
         self.scan = np.asarray(msg.ranges, dtype=np.float32)
 
     def on_odom(self, msg):
-        self.forward_speed = msg.twist.twist.linear.x
-        self.yaw_rate = msg.twist.twist.angular.z
+        vx = msg.twist.twist.linear.x
+        if self.mode == 'car':
+            self.forward_speed = speed_from_car_odom(vx)
+        else:
+            self.forward_speed = vx
+            self.yaw_rate = msg.twist.twist.angular.z     # the sim has no IMU; its odometry is exact
+
         x, y = msg.pose.pose.position.x, msg.pose.pose.position.y
         if self.position is not None:
             self.distance_driven += math.hypot(x - self.position[0], y - self.position[1])
         self.position = (x, y)
+
+    def on_imu(self, msg):
+        self.yaw_rate = yaw_rate_from_car_imu(msg.angular_velocity.z)
 
     def on_collision(self, msg):
         if msg.data and not self.in_collision:
@@ -110,11 +151,21 @@ class BCDriveNode(Node):
             self.get_logger().warn(f'collision #{self.collisions}{where}')
         self.in_collision = msg.data
 
+    def on_safety_drive(self, msg):
+        if not self.aeb_seen:
+            self.aeb_seen = True
+            self.get_logger().warn('AEB fired: the arbiter now keeps the car stopped. Relaunch to drive again.')
+
     # ----- control loop -----
 
+    def missing_inputs(self):
+        names = {'scan': self.scan, 'speed (odometry)': self.forward_speed,
+                 'yaw rate (IMU)' if self.mode == 'car' else 'yaw rate (odometry)': self.yaw_rate}
+        return [name for name, value in names.items() if value is None]
+
     def control_step(self):
-        if self.scan is None or self.forward_speed is None:
-            return                                          # wait until both sensors have published
+        if self.missing_inputs():
+            return                                          # never drive on partial inputs
         if self.prev_scan is None:
             self.prev_scan = self.scan                      # very first step: no previous scan yet
 
@@ -131,12 +182,15 @@ class BCDriveNode(Node):
         self.drive_pub.publish(msg)
 
     def log_status(self):
-        if self.position is None:
-            self.get_logger().info('waiting for scan and odometry ...')
+        missing = self.missing_inputs()
+        if missing:
+            self.get_logger().info(f'waiting for: {", ".join(missing)}')
             return
         self.get_logger().info(
-            f'x={self.position[0]:6.2f} y={self.position[1]:6.2f}  speed {self.forward_speed:4.2f} m/s  '
-            f'steer {self.steer:+.3f} rad  driven {self.distance_driven:6.1f} m  collisions {self.collisions}')
+            f'speed {self.forward_speed:4.2f} m/s  yaw rate {self.yaw_rate:+.2f} rad/s  '
+            f'steer {self.steer:+.3f} rad  driven {self.distance_driven:6.1f} m'
+            + (f'  collisions {self.collisions}' if self.mode == 'sim' else '')
+            + ('  [AEB stopped]' if self.aeb_seen else ''))
 
     def stop_car(self):
         self.publish_drive(0.0, 0.0)

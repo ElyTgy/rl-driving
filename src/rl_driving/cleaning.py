@@ -13,6 +13,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from .car_signals import speed_from_car_odom, yaw_rate_from_car_imu
+
 # A row is "stopped" below this speed. Stopped rows are near-duplicate scans where the expert isn't driving.
 STOP_SPEED_MPS = 0.1
 
@@ -77,11 +79,12 @@ def calibrate_signals(raw_rows):
     - odometry speed is sign-flipped:   speed = -vx
     - the IMU yaw rate is in deg/s:     yaw_rate = wz_imu * pi / 180
     - the label is the expert's steering BEFORE drift (during drift it holds the expert's correction)
+    The two sensor fixes come from car_signals, which the ROS node on the car uses too.
     """
     return {
         'time_s':          raw_rows['t'] - raw_rows['t'][0],
-        'speed_mps':       -raw_rows['vx'],
-        'yaw_rate_radps':  raw_rows['wz_imu'] * np.pi / 180,
+        'speed_mps':       speed_from_car_odom(raw_rows['vx']),
+        'yaw_rate_radps':  yaw_rate_from_car_imu(raw_rows['wz_imu']),
         'steer_label_rad': raw_rows['expert_steer'],
     }
 
