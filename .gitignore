@@ -1,0 +1,44 @@
+# --- AI agent files (local only) ---
+CLAUDE.md
+CLAUDE.local.md
+AGENTS.md
+.claude/
+
+# --- data: large and machine-specific, never commit ---
+raw-data/
+processed/
+*.tar.gz
+*.zip
+*.mp4
+*.npz
+*.npy
+*.db3
+*.mcap
+
+# --- training outputs ---
+checkpoints/
+*.pt
+*.pth
+runs/
+wandb/
+logs/
+
+# --- python / uv ---
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# --- notebooks ---
+.ipynb_checkpoints/
+
+# --- editor / OS ---
+.vscode/
+.idea/
+*.swp
+.DS_Store
