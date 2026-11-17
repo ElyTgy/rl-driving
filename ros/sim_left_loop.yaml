@@ -1,0 +1,33 @@
+# Sim config for testing the BC model on left_loop: a generated track with only left turns
+# (5 corners of different angles, 1.8 m wide, 58 m lap). Made by scripts/make_left_loop_map.py.
+# Purpose: check whether the model generalises to a *different* track with the kind of turns it
+# was trained on (the real track was a left-turn loop).
+# Launch with:  ros2 launch f1tenth_gym_ros gym_bridge_launch.py config:=$PWD/ros/sim_left_loop.yaml
+
+bridge:
+  ros__parameters:
+    # LiDAR: must match the real car (1081 beams over -135..+135 deg, 30 m).
+    scan_num_beams: 1081
+    scan_angle_min: -135.0
+    scan_angle_max: 135.0
+    scan_range_min: 0.02
+    scan_range_max: 30.0
+    lidar_noise_std: 0.01      # m
+
+    # The map lives in this repo, so it needs an absolute path (a relative one is looked up
+    # inside the f1tenth_gym_ros package). Change it if the repo moves.
+    map_path: '/home/elytgy/sim_ws/src/rl-driving/ros/maps/left_loop'
+    scale: 1.0
+    vehicle_params: 'f1tenth'
+    num_agent: 1
+
+    # Middle of the bottom straight, heading +x: counterclockwise, so every corner is a left
+    # turn and the wall on the car's right is the outer wall (as on the real track).
+    sx: 7.0
+    sy: -1.7
+    stheta: 0.0
+
+    # Off, so the keyboard teleop topic (/cmd_vel) cannot override the model's steering.
+    kb_teleop: False
+    use_sim_time: False
+    async_mode: True           # the sim runs in real time on its own timer

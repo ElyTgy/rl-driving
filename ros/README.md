@@ -13,7 +13,10 @@ It runs against `f1tenth_gym_ros` (the sim) and you watch it in Foxglove.
 |---|---|
 | `bc_drive_node.py` | the node: every 26 ms builds the observation with `rl_driving.preprocess.make_observation` and publishes the MLP's steering |
 | `sim_ims_small.yaml` | sim config: ims_small oval, lidar set to match the real car (1081 beams, ±135°, 30 m) |
-| `sim_levine.yaml` | sim config: levine corridor loop (harder: 90° corners, side openings) |
+| `sim_left_loop.yaml` | sim config: `maps/left_loop`, a generated track with only left turns (5 corners of different angles, 1.8 m wide, 58 m lap) |
+| `sim_ims.yaml` | sim config: IMS_map, a large oval (left turns only, gentle corners, ~5 min per lap) |
+| `sim_levine.yaml` | sim config: levine corridor loop (harder: 90° corners, side openings, right turns) |
+| `maps/left_loop.png/.yaml` | made by `scripts/make_left_loop_map.py` (edit the polygon there to make other left-turn tracks) |
 
 The node loads `checkpoints/bc_v1.npz`, a numpy copy of the trained model. The ROS Python has no
 torch, so the weights are exported once from the `.pt` in the project venv:
@@ -67,6 +70,8 @@ Either restart terminal 1, or use the 3D panel's publish tool in "pose estimate"
 | config | result |
 |---|---|
 | `sim_ims_small.yaml` (counterclockwise, outer wall on the right) | **drives cleanly**: 3+ laps in 75 s, no collisions, ~0.6 m from the right wall like the expert |
+| `sim_left_loop.yaml` (new track, left turns only) | **drives cleanly**: 127 m (~2.2 laps) in 130 s, no collisions, 0.51–0.6 m from the wall |
+| `sim_ims.yaml` (large oval, left turns only) | **drives cleanly**: 146 m (half a lap) in 150 s, no collisions, ~0.54 m from the wall |
 | ims_small clockwise (`stheta: 3.14159`, inner wall on the right) | crashes at the sharp tip of the inner wall after ~10 m |
 | `sim_levine.yaml` (clockwise) | straight corridors are fine; crashes at the first sharp right turn around a corner, and later turns into a dead end on the right |
 
@@ -75,7 +80,8 @@ data 23.7% of rows are hard left turns (yaw rate > 0.5 rad/s) and 0.4% are hard 
 the -40° beam the expert relies on never read more than 1.27 m. At a sharp convex corner that beam
 suddenly reads several metres, far outside anything the model saw, so its output is unreliable.
 This is a data-coverage limit of BC, not a bug in the node: more varied data (or RL fine-tuning
-in the sim) is what fixes it.
+in the sim) is what fixes it. On new tracks with only left turns (left_loop, IMS) it drives
+cleanly, so it generalises to new track shapes as long as the turns are the kind it was trained on.
 
 ## Notes
 - **Lidar config matters.** The model needs 1081 beams; the default `f1tenth_gym_ros/config/sim.yaml`

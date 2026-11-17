@@ -1,0 +1,30 @@
+# Sim config for testing the BC model on IMS_map: a large oval (about 110 x 55 m, ~2.1 m wide)
+# with only left turns when driven counterclockwise. The corners are much gentler than on the
+# real track, so this is the easy generalisation test. One lap at 1 m/s takes about 5 minutes.
+# Launch with:  ros2 launch f1tenth_gym_ros gym_bridge_launch.py config:=$PWD/ros/sim_ims.yaml
+
+bridge:
+  ros__parameters:
+    # LiDAR: must match the real car (1081 beams over -135..+135 deg, 30 m).
+    scan_num_beams: 1081
+    scan_angle_min: -135.0
+    scan_angle_max: 135.0
+    scan_range_min: 0.02
+    scan_range_max: 30.0
+    lidar_noise_std: 0.01      # m
+
+    map_path: 'maps/IMS_map'
+    scale: 1.0
+    vehicle_params: 'f1tenth'
+    num_agent: 1
+
+    # Bottom straight (walls at y = -40.9 and -38.8), heading +x: counterclockwise, so the
+    # corners are left turns and the wall on the car's right is the outer wall.
+    sx: 30.0
+    sy: -39.85
+    stheta: 0.0
+
+    # Off, so the keyboard teleop topic (/cmd_vel) cannot override the model's steering.
+    kb_teleop: False
+    use_sim_time: False
+    async_mode: True           # the sim runs in real time on its own timer
