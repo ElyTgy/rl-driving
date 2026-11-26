@@ -101,59 +101,58 @@ With the full stack (`bc_drive_launch.py mode:=sim`, checked 2026-11-16):
 
 ## Driving the real car
 
-The car is driven through the milestone 4 safety stack, exactly like `milestone4_wf_py.py`,
-with the BC node in wall_follow's place:
+The car is driven through the milestone 5 safety stack, like `milestone5_py.py`, with the BC node
+in gap_follow's place (bc_v2 was trained on gap_follow runs with this same safety node):
 
 ```
-bc_drive_node ──/wall_follow_drive──► drive_arbiter ──/drive──► car
-safety_node ────/safety_drive──────►      ▲           (once AEB fires, the arbiter only sends stops)
-lap_count ──────/safety_drive─────────────┘           (stops the car after target_laps)
+bc_drive_node ──/gap_follow_drive──► drive_arbiter ──/drive──► car
+safety_node ────/safety_drive, /aeb_true──►  ▲   (stage 1 slows to 0.85 m/s, stage 2 stops; both recover)
+lap_count ──────/safety_drive───────────────┤   (stops the car after target_laps)
+stop_node ──────/stop───────────────────────┘   (Space: stop and stay stopped)
 ```
 
-The node publishes on `/wall_follow_drive` because the milestone 4 arbiter already forwards that
-topic, so the milestone code needs no change. **Never run wall_follow at the same time.**
-In `mode:=car` the node refuses to publish straight to `/drive` (that would bypass the AEB).
+**Never run gap_follow at the same time.** In `mode:=car` the node refuses to publish straight to
+`/drive` (that would bypass the safety node).
 
 ### Once: set up the Jetson
-1. Get this repo onto the Jetson (`git pull` on the `real-driving` branch, or copy it), at
-   `~/sim_ws/src/rl-driving`. The launch file finds everything relative to the repo.
-2. Copy the model. `checkpoints/` is gitignored, so it is not in git:
+1. Copy the code and the model (uncommitted / gitignored, so not via git). From the laptop:
    ```bash
-   # on the laptop
-   scp checkpoints/bc_v1.npz <jetson-user>@<jetson-ip>:~/sim_ws/src/rl-driving/checkpoints/
+   cd ~/sim_ws/src/rl-driving
+   rsync -av --mkpath --exclude __pycache__ src ros <jetson-user>@<jetson-ip>:~/rl-driving/
+   rsync -av --mkpath checkpoints/bc_v2.npz <jetson-user>@<jetson-ip>:~/rl-driving/checkpoints/
    ```
-3. Build milestone 4 if it is not built yet: `cd ~/sim_ws && colcon build --packages-select milestone4`.
-4. Check that the ROS Python has numpy: `python3 -c "import numpy; print(numpy.__version__)"`.
-   (The node is tested with numpy 1.21 and 2.2; torch is not needed.)
+   Keep it outside the colcon workspace, so colcon does not try to build it.
+2. milestone5 must be built and sourced on the Jetson.
+3. Check that the ROS Python has numpy: `python3 -c "import numpy; print(numpy.__version__)"` (no torch needed).
 
-### Every time
-1. Start the car's drivers (lidar, VESC/odometry, IMU) the way you do for milestone 4.
-   Check the topics exist: `ros2 topic list | grep -E "^/scan|^/odom|/sensors/imu/raw"`.
-2. Source ROS and the workspace, then from `~/sim_ws/src/rl-driving`:
+### Every time (3 terminals)
+1. Car drivers (lidar, VESC/odometry, IMU) as for milestone 5. Check:
+   `ros2 topic list | grep -E "^/scan|^/odom|/sensors/imu/raw"`.
+2. Stop node, in its own terminal (it reads Space from the keyboard, so it cannot be in the launch):
+   `ros2 run milestone5 stop_node`
+3. Everything else, from `~/rl-driving`:
    ```bash
    ros2 launch ros/bc_drive_launch.py mode:=car
    ```
-   Options: `speed:=1.0` (keep 1.0: the model was trained at that speed), `target_laps:=1`,
+   Options: `max_speed:=1.0` (cap on the model's speed; it was trained on 1.0-1.8 m/s), `target_laps:=1`,
    `record:=false`, `log_dir:=~/bc_logs`.
-3. The node waits until scan, odometry and IMU have all arrived (it logs `waiting for: ...`),
-   then drives. A bag of `/scan /odom /sensors/imu/raw /wall_follow_drive /drive /safety_drive`
-   goes to `~/bc_logs/bc_run_<time>/`.
-4. After an AEB stop the arbiter keeps the car stopped; Ctrl-C and relaunch to drive again.
+4. The node waits for scan, odometry and IMU (it logs `waiting for: ...`), then drives. A bag of the
+   inputs and commands goes to `~/bc_logs/bc_run_<time>/`.
+5. After a Space stop the arbiter keeps the car stopped; Ctrl-C the launch and relaunch to drive again.
 
 ### Checks before the first drive (wheels off the ground)
-- `ros2 topic hz /wall_follow_drive` shows ~38 Hz.
+- `ros2 topic hz /gap_follow_drive` shows ~38 Hz.
 - Hold a board close on the car's **right**: the logged steer goes **positive** (left, away from it).
 - Turn the car **left** by hand: the logged yaw rate is **positive**, roughly in rad/s (not 50+).
-- On the first drive: the logged speed is about **+1.00** m/s. If it reads -1.00, the odometry
-  sign is not what the data showed; stop and check before trusting the model.
+- On the first drive: the logged speed is positive (about the commanded speed). If it is negative,
+  the odometry sign is not what the data showed; stop and check before trusting the model.
 
 ### Risks
-- **Only left turns are safe.** The model was trained on a left-turn loop and crashes at sharp
-  right turns in the sim. Drive the track the data was recorded on, in the same direction.
-- **No obstacles.** The model never learned to avoid them; the AEB is the only protection.
+- **Little data.** bc_v2 saw ~4 minutes of driving (4 runs on 2026-11-24). Use the same track,
+  direction and kind of obstacles.
 - **Actuation delay.** The real car reacts ~100 ms later than the sim, so expect more weaving.
-- **The AEB only looks ahead.** It works on time-to-collision, so a slow drift into a side wall
-  may not trigger it. Keep the physical kill switch / deadman in hand.
+- **The safety node mostly looks ahead.** A slow drift into a side wall may not trigger it. Keep the
+  physical kill switch / deadman in hand; Ctrl-C over SSH is not an e-stop.
 
 ## Notes
 - **Lidar config matters.** The model needs 1081 beams; the default `f1tenth_gym_ros/config/sim.yaml`
