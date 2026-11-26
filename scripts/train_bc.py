@@ -1,4 +1,4 @@
-"""Train the BC steering MLP (script version of notebooks/02_train_bc.ipynb).
+"""Train the BC MLP: steering and speed (the v1 steering-only version is notebooks/02_train_bc.ipynb).
 
 Steps:
   1. Load the k-fold dataset made by scripts/build_dataset.py (processed/bc_v<version>_folds.npz).
@@ -21,7 +21,7 @@ import torch
 
 from rl_driving.bc import predict, save_model, train_bc
 from rl_driving.evaluate import fit_ridge, metrics
-from rl_driving.preprocess import PREPROC_VERSION, STEER_MAX
+from rl_driving.preprocess import PREPROC_VERSION, STEER_MAX, action_to_speed
 
 REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_DATA = os.path.join(REPO_DIR, 'processed', f'bc_v{PREPROC_VERSION}_folds.npz')
@@ -41,26 +41,25 @@ def run_kfold(X, y, drift, train_masks, val_masks, settings):
 
         ridge = fit_ridge(X[tr], y[tr])
         for name, p in [('mlp', pred), ('linear', ridge(X[va])),
-                        ('mean', np.full(va.sum(), y[tr].mean())), ('zero', np.zeros(va.sum()))]:
+                        ('mean', np.broadcast_to(y[tr].mean(axis=0), y[va].shape)), ('zero', np.zeros_like(y[va]))]:
             results.append({'fold': k, 'model': name, **metrics(p, y[va], drift[va])})
         mlp = results[-4]
-        print(f'fold {k}: best epoch {hist["best_epoch"]:3d}, val RMSE {mlp["rmse"]:.4f} rad, R² {mlp["r2"]:.3f}',
-              flush=True)
+        print(f'fold {k}: best epoch {hist["best_epoch"]:3d}, steer RMSE {mlp["rmse"]:.4f} rad (R² {mlp["r2"]:.3f}), '
+              f'speed RMSE {mlp["speed_rmse"]:.4f} m/s (R² {mlp["speed_r2"]:.3f})', flush=True)
     return results, histories, val_preds
 
 
 def summarise(results):
     """Print mean ± std over folds per model, and return the means as a dict."""
-    print(f'\n{"model":8s} {"RMSE [rad]":>16s} {"MAE [rad]":>16s} {"R²":>14s} {"MAE drift [rad]":>17s}')
+    keys = ['rmse', 'r2', 'speed_rmse', 'speed_r2']
+    print(f'\n{"model":8s} {"steer RMSE [rad]":>18s} {"steer R²":>16s} {"speed RMSE [m/s]":>18s} {"speed R²":>16s}')
     summary = {}
     for name in MODELS:
         rows = [r for r in results if r['model'] == name]
-        cols, summary[name] = [], {}
-        for key in ['rmse', 'mae', 'r2', 'mae_drift']:
-            v = np.array([r[key] for r in rows])
-            summary[name][key] = float(np.nanmean(v))
-            cols.append(f'{np.nanmean(v):.4f} ± {np.nanstd(v):.4f}')
-        print(f'{name:8s} {cols[0]:>16s} {cols[1]:>16s} {cols[2]:>14s} {cols[3]:>17s}')
+        values = {key: np.array([r[key] for r in rows], dtype=float) for key in rows[0] if key not in ('fold', 'model')}
+        summary[name] = {key: float(np.nanmean(v)) for key, v in values.items()}
+        cols = [f'{np.nanmean(values[key]):.4f} ± {np.nanstd(values[key]):.4f}' for key in keys]
+        print(f'{name:8s} ' + ' '.join(f'{c:>18s}' if i % 2 == 0 else f'{c:>16s}' for i, c in enumerate(cols)))
     return summary
 
 
@@ -77,23 +76,24 @@ def save_plots(plot_dir, histories, val_preds, ds, y, drift, val_masks):
         ax.plot(h['train'], color=color, lw=1, ls='--', alpha=0.7)
         ax.plot(h['val'], color=color, lw=1.6, label=f'fold {k}')
         ax.plot(h['best_epoch'], h['val'][h['best_epoch']], 'o', color=color)
-    ax.set_yscale('log'); ax.set_xlabel('epoch'); ax.set_ylabel('MSE (normalised steering)')
+    ax.set_yscale('log'); ax.set_xlabel('epoch'); ax.set_ylabel('MSE (normalised steer + speed)')
     ax.set_title('dashed = train, solid = val'); ax.legend(frameon=False, ncol=5, fontsize=8); ax.grid(alpha=0.25)
     fig.tight_layout(); fig.savefig(os.path.join(plot_dir, 'learning_curves.png'), dpi=120); plt.close(fig)
 
-    # Predictions vs expert on fold 0's val rows, one panel per run, drift shaded.
+    # Predictions vs expert on fold 0's val rows: per run, a steering panel and a speed panel.
     k, va = 0, val_masks[0]
     t_va, run_va = ds['t'][va], ds['run'][va]
     runs_in_fold = np.unique(run_va)
-    fig, axes = plt.subplots(len(runs_in_fold), 1, figsize=(13, 3 * len(runs_in_fold)), squeeze=False)
-    for ax, r in zip(axes[:, 0], runs_in_fold):
+    fig, axes = plt.subplots(2 * len(runs_in_fold), 1, figsize=(13, 5 * len(runs_in_fold)), squeeze=False)
+    for i, r in enumerate(runs_in_fold):
         m = run_va == r
-        tt, d = t_va[m], drift[va][m] == 1
-        ax.fill_between(tt, -0.35, 0.35, where=d, color='#888888', alpha=0.2, lw=0, label='drift active')
-        ax.plot(tt, y[va][m] * STEER_MAX, '.', ms=2.5, color='#2a78d6', label='expert (label)')
-        ax.plot(tt, val_preds[k][m] * STEER_MAX, '.', ms=2.5, color='#eb6834', label='MLP prediction')
-        ax.set_ylabel('steering [rad]'); ax.set_title(f'fold {k}, run {ds["runs"][r]} (val rows only)', fontsize=10)
-        ax.grid(alpha=0.25); ax.legend(frameon=False, fontsize=8, ncol=3)
+        tt = t_va[m]
+        for ax, j, to_unit, unit in [(axes[2 * i, 0], 0, lambda a: a * STEER_MAX, 'steering [rad]'),
+                                     (axes[2 * i + 1, 0], 1, action_to_speed, 'speed [m/s]')]:
+            ax.plot(tt, to_unit(y[va][m, j]), '.', ms=2.5, color='#2a78d6', label='expert (label)')
+            ax.plot(tt, to_unit(val_preds[k][m, j]), '.', ms=2.5, color='#eb6834', label='MLP prediction')
+            ax.set_ylabel(unit); ax.grid(alpha=0.25); ax.legend(frameon=False, fontsize=8, ncol=2)
+        axes[2 * i, 0].set_title(f'fold {k}, run {ds["runs"][r]} (val rows only)', fontsize=10)
     axes[-1, 0].set_xlabel('time [s]')
     fig.tight_layout(); fig.savefig(os.path.join(plot_dir, 'predictions_fold0.png'), dpi=120); plt.close(fig)
     print(f'plots saved in {plot_dir}')
@@ -148,6 +148,7 @@ def main():
     if 'kfold_mean' in report:
         extra['kfold_rmse_rad'] = report['kfold_mean']['mlp']['rmse']
         extra['kfold_r2'] = report['kfold_mean']['mlp']['r2']
+        extra['kfold_speed_rmse_mps'] = report['kfold_mean']['mlp']['speed_rmse']
     save_model(final_model, args.out, **extra)
     json_path = os.path.splitext(args.out)[0] + '.json'
     with open(json_path, 'w') as f:

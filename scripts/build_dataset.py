@@ -1,18 +1,18 @@
 """Build the BC training datasets from the recorded runs (script version of notebooks/data-cleaning.ipynb).
 
+Data: the MS5 gap_follow runs of 2026-11-24 (obstacles, speed 1.0-1.8 m/s). The bc_v1 version of this
+script, on the 2026-11-06 wall_follow runs, is in git history.
+
 Steps:
-  1. Clean every run in RUNS (src/rl_driving/cleaning.py): drop rows with missing data, after a safety
-     stop, while stopped, after the run's cut time, or without a valid previous scan.
-  2. Turn the kept rows into network inputs X and labels y (src/rl_driving/preprocess.py).
-  3. Make two splits and save both to processed/:
-       bc_v<version>.npz        train / val by whole run
-       bc_v<version>_folds.npz  blocked k-fold: time chunks shuffled into folds, with a gap around val chunks
-                                (this is what notebooks/02_train_bc.ipynb trains on)
+  1. Clean every run in RUNS (src/rl_driving/cleaning.py): drop rows with missing data, while the safety
+     system has the car stopped, while stopped, after the run's cut time, or without a valid previous scan.
+  2. Turn the kept rows into network inputs X and labels y = [steer, speed] (src/rl_driving/preprocess.py).
+  3. Make the blocked k-fold split (time chunks shuffled into folds, with a gap around val chunks) and
+     save it to processed/bc_v<version>_folds.npz (what scripts/train_bc.py trains on).
   4. Print a summary, and optionally save check plots.
 
 Usage (from the repo root):
     .venv/bin/python scripts/build_dataset.py
-    .venv/bin/python scripts/build_dataset.py --use-fail-run          # include the fail-run (095949)
     .venv/bin/python scripts/build_dataset.py --plots processed/plots # also save check plots as PNGs
 """
 import argparse
@@ -21,26 +21,20 @@ import os
 import numpy as np
 
 from rl_driving.cleaning import RunConfig, clean_run, describe_dropped_rows
-from rl_driving.preprocess import N_BINS, OBS_DIM, PREPROC_VERSION, make_observation, steer_to_action
+from rl_driving.preprocess import (N_BINS, OBS_DIM, PREPROC_VERSION, make_observation, speed_to_action,
+                                   steer_to_action)
 
 REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-RAW_DIR = os.path.join(REPO_DIR, 'raw-data')
+RAW_DIR = os.path.join(REPO_DIR, 'raw-data', 'data-logs_2026-11-24')
 DEFAULT_OUT_DIR = os.path.join(REPO_DIR, 'processed')
 
-HALF_RUN = '20261106_094614'
-ONE_RUN = '20261106_094720'
-FAIL_RUN = '20261106_095949'
-
-# Every run we may use. no-cam-run (094711) is left out because it is empty.
+# MS5 gap_follow runs, no drift. The stop button at the end of each run is dropped by the safety_stop rule.
 RUNS = [
-    RunConfig(HALF_RUN, cut_time_s=20.0, note='half-run: obstacle placed too early, AEB at 21.7 s'),
-    RunConfig(ONE_RUN, cut_time_s=None, note='1-run: AEB at 74.2 s cuts the tail'),
-    RunConfig(FAIL_RUN, cut_time_s=None, note='fail-run: unknown why "fail", recorded with 30% drift'),
+    RunConfig('20261124_114302', note='14 s, many safety stops'),
+    RunConfig('20261124_114338'),
+    RunConfig('20261124_114513'),
+    RunConfig('20261124_114654'),
 ]
-
-# Train / val by whole run (the simple split)
-RUN_SPLIT_TRAIN = [ONE_RUN]
-RUN_SPLIT_VAL = [HALF_RUN]
 
 # Blocked k-fold
 CHUNK_LENGTH_S = 8.0   # each run is cut into ~8 s pieces; a leftover under half that joins the piece before
@@ -55,12 +49,13 @@ def build_features_and_labels(usable_rows):
     """Turn one cleaned run into (features X, labels y, drift flags).
 
     X: (rows, OBS_DIM) from make_observation: current scan bins, previous scan bins, speed, yaw rate
-    y: (rows,) expert steering normalised to [-1, 1]
+    y: (rows, 2) expert [steering, speed], each normalised to [-1, 1]
     drift: (rows,) 1 while drift was active; not an input, used for stats
     """
     features = make_observation(usable_rows['ranges'], usable_rows['previous_ranges'],
                                 usable_rows['speed_mps'], usable_rows['yaw_rate_radps'])
-    labels = steer_to_action(usable_rows['steer_label_rad'])
+    labels = np.stack([steer_to_action(usable_rows['steer_label_rad']),
+                       speed_to_action(usable_rows['speed_label_mps'])], axis=1)
     drift = usable_rows['drift_active'].astype(np.float32)
     return features, labels, drift
 
@@ -139,7 +134,7 @@ def build_kfold_split(dataset_by_run, cleaned_by_run, run_ids):
     for k in range(NUM_FOLDS):
         train_masks[k], val_masks[k] = fold_train_val_masks(fold, run_index, time_s, k)
 
-    # Key names match what notebooks/02_train_bc.ipynb reads.
+    # Key names match what scripts/train_bc.py reads.
     return {
         'X': features, 'y': labels, 'drift': drift, 't': time_s, 'run': run_index,
         'chunk': chunk_id, 'fold': fold, 'train_masks': train_masks, 'val_masks': val_masks,
@@ -151,11 +146,13 @@ def build_kfold_split(dataset_by_run, cleaned_by_run, run_ids):
 # ---------------------------------------------------------------- reports
 
 def print_run_summary(cleaned_by_run):
-    print(f'{"run":16s} {"rows":>6s} {"drift":>6s} {"speed":>6s}  time kept')
+    print(f'{"run":16s} {"rows":>6s} {"drift":>6s} {"stage1":>6s} {"speed":>6s} {"|steer|>max":>11s}  time kept')
     for run_id, cleaned in cleaned_by_run.items():
         rows = cleaned.usable_rows
+        capped = np.mean(np.abs(steer_to_action(rows['steer_label_rad'])) == 1)
         print(f'{run_id:16s} {len(rows["steer_label_rad"]):6d} {rows["drift_active"].mean():6.1%} '
-              f'{np.median(rows["speed_mps"]):6.2f}  {rows["time_s"][0]:.1f}-{rows["time_s"][-1]:.1f} s')
+              f'{rows["aeb_active"].mean():6.1%} {np.median(rows["speed_mps"]):6.2f} {capped:11.1%}  '
+              f'{rows["time_s"][0]:.1f}-{rows["time_s"][-1]:.1f} s')
 
 
 def print_feature_summary(name, features, labels, drift):
@@ -167,7 +164,9 @@ def print_feature_summary(name, features, labels, drift):
     for part_name, columns in feature_parts:
         values = features[:, columns]
         print(f'  {part_name:14s} min {values.min():+.3f}  mean {values.mean():+.3f}  max {values.max():+.3f}')
-    print(f'  {"label y":14s} min {labels.min():+.3f}  mean {labels.mean():+.3f}  max {labels.max():+.3f}')
+    for j, label_name in enumerate(['label steer', 'label speed']):
+        values = labels[:, j]
+        print(f'  {label_name:14s} min {values.min():+.3f}  mean {values.mean():+.3f}  max {values.max():+.3f}')
 
 
 def print_fold_summary(kfold):
@@ -210,7 +209,7 @@ def save_check_plots(plot_dir, cleaned_by_run, kfold):
         fig.savefig(os.path.join(plot_dir, f'kept_rows_{run_id}.png'), dpi=90)
         plt.close(fig)
 
-    example_scan = cleaned_by_run[HALF_RUN].usable_rows['ranges'][300]
+    example_scan = next(iter(cleaned_by_run.values())).usable_rows['ranges'][300]
     beam_angles_deg = np.linspace(-135, 135, N_BEAMS)
     bin_centres_deg = beam_angles_deg[np.arange(0, N_BEAMS - 1, BEAMS_PER_BIN)] + BEAMS_PER_BIN * 0.25 / 2
     fig, ax = plt.subplots(figsize=(13, 3.5))
@@ -250,15 +249,12 @@ def save_check_plots(plot_dir, cleaned_by_run, kfold):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--out-dir', default=DEFAULT_OUT_DIR, help='where to save the .npz files')
-    parser.add_argument('--use-fail-run', action='store_true', help='include the fail-run (095949) in training data')
     parser.add_argument('--plots', metavar='DIR', help='also save check plots as PNGs in DIR')
     args = parser.parse_args()
 
-    runs_to_use = [run for run in RUNS if run.run_id != FAIL_RUN or args.use_fail_run]
-
     print('=== cleaning')
     cleaned_by_run = {}
-    for run in runs_to_use:
+    for run in RUNS:
         cleaned = clean_run(RAW_DIR, run)
         cleaned_by_run[run.run_id] = cleaned
         print(f'run {run.run_id} ({run.note}), cut = {run.cut_time_s}')
@@ -269,28 +265,15 @@ def main():
     dataset_by_run = {run_id: build_features_and_labels(cleaned.usable_rows)
                       for run_id, cleaned in cleaned_by_run.items()}
 
-    print('\n=== split by run')
-    train_runs = RUN_SPLIT_TRAIN + ([FAIL_RUN] if args.use_fail_run else [])
-    train_features, train_labels, train_drift = concatenate_runs(dataset_by_run, train_runs)
-    val_features, val_labels, val_drift = concatenate_runs(dataset_by_run, RUN_SPLIT_VAL)
-    print_feature_summary(f'train {train_runs}', train_features, train_labels, train_drift)
-    print_feature_summary(f'val {RUN_SPLIT_VAL}', val_features, val_labels, val_drift)
-
     print('\n=== blocked k-fold')
     kfold = build_kfold_split(dataset_by_run, cleaned_by_run, list(dataset_by_run))
+    print_feature_summary('all runs', kfold['X'], kfold['y'], kfold['drift'])
     print_fold_summary(kfold)
 
     os.makedirs(args.out_dir, exist_ok=True)
-    run_split_path = os.path.join(args.out_dir, f'bc_v{PREPROC_VERSION}.npz')
-    np.savez_compressed(
-        run_split_path,
-        X_train=train_features, y_train=train_labels, drift_train=train_drift,
-        X_val=val_features, y_val=val_labels, drift_val=val_drift,
-        preproc_version=PREPROC_VERSION, train_runs=np.array(train_runs), val_runs=np.array(RUN_SPLIT_VAL),
-    )
     kfold_path = os.path.join(args.out_dir, f'bc_v{PREPROC_VERSION}_folds.npz')
     np.savez_compressed(kfold_path, **kfold)
-    print(f'\nsaved {run_split_path}\nsaved {kfold_path}')
+    print(f'\nsaved {kfold_path}')
 
     if args.plots:
         save_check_plots(args.plots, cleaned_by_run, kfold)

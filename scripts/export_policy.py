@@ -5,7 +5,7 @@ After exporting, the script runs both versions on the training observations and 
 they agree, so a wrong layer order or a missing transpose cannot slip through.
 
 Usage (from the repo root, in the project venv):
-    .venv/bin/python scripts/export_policy.py                          # checkpoints/bc_v1.pt -> .npz
+    .venv/bin/python scripts/export_policy.py                          # checkpoints/bc_v2.pt -> .npz
     .venv/bin/python scripts/export_policy.py --checkpoint path/to/model.pt
 """
 import argparse
@@ -22,7 +22,7 @@ from rl_driving.preprocess import PREPROC_VERSION
 REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_CHECKPOINT = os.path.join(REPO_DIR, 'checkpoints', f'bc_v{PREPROC_VERSION}.pt')
 DEFAULT_DATA = os.path.join(REPO_DIR, 'processed', f'bc_v{PREPROC_VERSION}_folds.npz')
-MAX_ALLOWED_DIFF = 1e-4      # normalised steering; float32 rounding is ~1e-6
+MAX_ALLOWED_DIFF = 1e-4      # normalised actions; float32 rounding is ~1e-6
 
 
 def to_numpy_policy(model):
@@ -44,7 +44,7 @@ def main():
     out_path = os.path.splitext(args.checkpoint)[0] + '.npz'
     policy.save(out_path)
 
-    # Check: the reloaded numpy policy must give the same steering as torch on real observations.
+    # Check: the reloaded numpy policy must give the same outputs as torch on real observations.
     X = np.load(args.data)['X']
     diff = np.abs(NumpyPolicy.load(out_path)(X) - predict(model, X)).max()
     print(f'saved {out_path}  (layers: {[W.shape for W in policy.weights]})')
