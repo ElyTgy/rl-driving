@@ -78,7 +78,8 @@ def calibrate_signals(raw_rows):
 
     - odometry speed is sign-flipped:   speed = -vx
     - the IMU yaw rate is in deg/s:     yaw_rate = wz_imu * pi / 180
-    - the label is the expert's steering BEFORE drift (during drift it holds the expert's correction)
+    - the labels are the expert's steering BEFORE drift (during drift it holds the expert's correction)
+      and the expert's own speed (not the safety node's cap)
     The two sensor fixes come from car_signals, which the ROS node on the car uses too.
     """
     return {
@@ -86,7 +87,22 @@ def calibrate_signals(raw_rows):
         'speed_mps':       speed_from_car_odom(raw_rows['vx']),
         'yaw_rate_radps':  yaw_rate_from_car_imu(raw_rows['wz_imu']),
         'steer_label_rad': raw_rows['expert_steer'],
+        'speed_label_mps': raw_rows['expert_speed'],
     }
+
+
+def safety_stop_mask(raw_rows):
+    """Rows where the safety system has the car stopped, so the expert is not the one driving.
+
+    MS5 recorder (has a hard_stop column): safety is staged and recovers. Stage 1 only caps the speed
+    at 0.85 m/s and keeps the expert's steering, so those rows are kept (they are the obstacle
+    avoidance). Dropped: stage 2 (aeb_active with a 0 m/s cap) and everything after the stop button.
+    MS3/MS4 recorder: aeb_active latches, and the car stays stopped after the first safety stop.
+    """
+    if 'hard_stop' not in raw_rows:
+        return raw_rows['aeb_active'] == 1
+    stage_2 = (raw_rows['aeb_active'] == 1) & (raw_rows['safety_speed'] == 0)
+    return stage_2 | (raw_rows['hard_stop'] == 1)
 
 
 # ---------------------------------------------------------------- deciding which rows to keep
@@ -94,8 +110,8 @@ def calibrate_signals(raw_rows):
 def build_drop_masks(raw_rows, signals, cut_time_s=None):
     """One True/False mask per drop reason (True = drop that row), plus the combined result.
 
-    missing_data      the label, speed, yaw rate or any lidar beam is NaN (start of run, topics not ready)
-    safety_stop       aeb_active is 1. It latches, so this drops everything after the first safety stop
+    missing_data      a label, speed, yaw rate or any lidar beam is NaN (start of run, topics not ready)
+    safety_stop       the safety system has the car stopped (see safety_stop_mask)
     stopped           speed below STOP_SPEED_MPS
     after_cut         time after cut_time_s (hand-chosen end of usable data)
     no_previous_scan  the row before is not kept, or is more than MAX_SCAN_GAP_S earlier
@@ -108,9 +124,10 @@ def build_drop_masks(raw_rows, signals, cut_time_s=None):
     time_s = signals['time_s']
     n_rows = len(time_s)
     masks = {
-        'missing_data': (np.isnan(signals['steer_label_rad']) | np.isnan(signals['speed_mps'])
+        'missing_data': (np.isnan(signals['steer_label_rad']) | np.isnan(signals['speed_label_mps'])
+                         | np.isnan(signals['speed_mps'])
                          | np.isnan(signals['yaw_rate_radps']) | np.isnan(raw_rows['ranges']).any(axis=1)),
-        'safety_stop': raw_rows['aeb_active'] == 1,
+        'safety_stop': safety_stop_mask(raw_rows),
         'stopped': signals['speed_mps'] < STOP_SPEED_MPS,     # NaN < x is False; NaN rows are in missing_data
         'after_cut': time_s > cut_time_s if cut_time_s is not None else np.zeros(n_rows, dtype=bool),
     }
@@ -171,8 +188,8 @@ def select_usable_rows(raw_rows, signals, drop_masks):
     """Keep only the usable rows and only the columns training needs.
 
     Inputs:  ranges (current scan), previous_ranges (the scan just before), speed_mps, yaw_rate_radps
-    Label:   steer_label_rad (expert_steer, in rad, not normalised yet)
-    Extras:  time_s and drift_active, for plots, stats and splitting (not network inputs)
+    Labels:  steer_label_rad (expert_steer, rad) and speed_label_mps (expert_speed, m/s), not normalised yet
+    Extras:  time_s, drift_active and aeb_active, for plots, stats and splitting (not network inputs)
     previous_ranges takes row i-1 for every kept row i; the no_previous_scan rule guarantees it is valid.
     """
     kept_index = np.where(drop_masks['usable'])[0]
@@ -182,8 +199,10 @@ def select_usable_rows(raw_rows, signals, drop_masks):
         'speed_mps':       signals['speed_mps'][kept_index],
         'yaw_rate_radps':  signals['yaw_rate_radps'][kept_index],
         'steer_label_rad': signals['steer_label_rad'][kept_index],
+        'speed_label_mps': signals['speed_label_mps'][kept_index],
         'time_s':          signals['time_s'][kept_index],
         'drift_active':    raw_rows['drift_active'][kept_index],
+        'aeb_active':      raw_rows['aeb_active'][kept_index],
     }
 
 

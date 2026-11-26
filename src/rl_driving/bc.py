@@ -1,7 +1,7 @@
 """Behavioural cloning: the steering network and its training loop.
 
 The network maps an observation from `preprocess.make_observation` (OBS_DIM numbers) to one
-normalised steering value (use `preprocess.action_to_steer` to get radians).
+normalised [steer, speed] pair (use `preprocess.action_to_steer` / `action_to_speed` for rad and m/s).
 It is a plain MLP with tanh hidden layers, the same shape SB3's PPO actor uses with
 net_arch=list(HIDDEN) and activation_fn=nn.Tanh, so the weights can be copied into PPO later
 (PPO's net_arch must match the HIDDEN the model was trained with).
@@ -23,23 +23,25 @@ HIDDEN = (64, 64)
 
 
 class SteeringMLP(nn.Module):
-    """obs (B, OBS_DIM) -> normalised steering (B,). The output is linear, not squashed (like PPO's action mean)."""
+    """obs (B, OBS_DIM) -> normalised actions (B, out_dim), or (B,) when out_dim is 1 (bc_v1).
+    The output is linear, not squashed (like PPO's action mean)."""
 
-    def __init__(self, obs_dim=OBS_DIM, hidden=HIDDEN):
+    def __init__(self, obs_dim=OBS_DIM, hidden=HIDDEN, out_dim=2):
         super().__init__()
         layers, last = [], obs_dim
         for h in hidden:
             layers += [nn.Linear(last, h), nn.Tanh()]
             last = h
         self.body = nn.Sequential(*layers)
-        self.head = nn.Linear(last, 1)
+        self.head = nn.Linear(last, out_dim)
 
     def forward(self, obs):
-        return self.head(self.body(obs)).squeeze(-1)
+        out = self.head(self.body(obs))
+        return out.squeeze(-1) if out.shape[-1] == 1 else out
 
 
 def predict(model, X, batch_size=4096):
-    """Run the model on a numpy array, return a numpy array of normalised steering."""
+    """Run the model on a numpy array, return a numpy array of normalised actions."""
     model.eval()
     out = []
     with torch.no_grad():
@@ -59,7 +61,7 @@ def train_bc(X_train, y_train, X_val=None, y_val=None, epochs=200, lr=1e-3, weig
     """
     torch.manual_seed(seed)
     rng = np.random.default_rng(seed)
-    model = SteeringMLP(X_train.shape[1], hidden)
+    model = SteeringMLP(X_train.shape[1], hidden, 1 if y_train.ndim == 1 else y_train.shape[1])
     opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     # Cosine decay: big steps early, tiny steps at the end so the weights settle instead of bouncing.
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs, eta_min=lr * 0.01)
@@ -108,6 +110,7 @@ def save_model(model, path, **extra):
         'state_dict': model.state_dict(),
         'obs_dim': model.body[0].in_features,
         'hidden': tuple(m.out_features for m in model.body if isinstance(m, nn.Linear)),
+        'out_dim': model.head.out_features,
         'preproc_version': PREPROC_VERSION,
         **extra,
     }, path)
@@ -118,7 +121,7 @@ def load_model(path):
     ckpt = torch.load(path, weights_only=False)
     if ckpt['preproc_version'] != PREPROC_VERSION:
         raise ValueError(f'model uses preprocessing v{ckpt["preproc_version"]}, code is v{PREPROC_VERSION}')
-    model = SteeringMLP(ckpt['obs_dim'], ckpt['hidden'])
+    model = SteeringMLP(ckpt['obs_dim'], ckpt['hidden'], ckpt.get('out_dim', 1))
     model.load_state_dict(ckpt['state_dict'])
     model.eval()
     return model, ckpt

@@ -9,7 +9,7 @@ Observation layout (length OBS_DIM = 2 * N_BINS + 2):
 """
 import numpy as np
 
-PREPROC_VERSION = 1
+PREPROC_VERSION = 2   # v2: two outputs (steer, speed), steering labels clipped to [-1, 1]
 
 # Lidar, matching the real car (meta.json) and the sim config
 N_BEAMS = 1081            # -135° .. +135°, 0.25° apart
@@ -26,6 +26,8 @@ N_BINS = len(_BIN_STARTS)                                # 108
 SPEED_SCALE = 3.0         # m/s
 YAW_RATE_SCALE = 2.0      # rad/s; the wall follower peaks around 1.45 rad/s
 STEER_MAX = 0.4189        # rad; the sim's steering limit, used to normalise the label
+SPEED_MIN = 0.5           # m/s; speed action -1
+SPEED_MAX = 2.0           # m/s; speed action +1 (the MS5 gap_follow expert drives 1.0-1.8 m/s)
 
 OBS_DIM = 2 * N_BINS + 2
 
@@ -65,10 +67,22 @@ def make_observation(ranges, ranges_prev, speed, yaw_rate):
 
 
 def steer_to_action(steer):
-    """Steering in rad -> network output in [-1, 1]."""
-    return np.asarray(steer, dtype=np.float32) / STEER_MAX
+    """Steering in rad -> network output in [-1, 1]. Steering beyond STEER_MAX is capped."""
+    return np.clip(np.asarray(steer, dtype=np.float32) / STEER_MAX, -1.0, 1.0)
 
 
 def action_to_steer(action):
     """Network output in [-1, 1] -> steering in rad."""
     return np.clip(np.asarray(action, dtype=np.float32), -1.0, 1.0) * STEER_MAX
+
+
+def speed_to_action(speed):
+    """Speed in m/s -> network output in [-1, 1] (SPEED_MIN -> -1, SPEED_MAX -> +1)."""
+    action = (np.asarray(speed, dtype=np.float32) - SPEED_MIN) / (SPEED_MAX - SPEED_MIN) * 2 - 1
+    return np.clip(action, -1.0, 1.0)
+
+
+def action_to_speed(action):
+    """Network output in [-1, 1] -> speed in m/s."""
+    action = np.clip(np.asarray(action, dtype=np.float32), -1.0, 1.0)
+    return SPEED_MIN + (action + 1) / 2 * (SPEED_MAX - SPEED_MIN)

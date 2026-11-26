@@ -1,4 +1,4 @@
-"""The trained steering MLP, run with numpy only (no torch).
+"""The trained BC MLP, run with numpy only (no torch).
 
 Why this exists: the ROS 2 Python on this machine (sim_ws/.venv) and, later, the Jetson do not
 have torch. The network is small (two tanh layers and a linear head, see bc.SteeringMLP), so its
@@ -20,7 +20,8 @@ from .preprocess import PREPROC_VERSION
 
 
 class NumpyPolicy:
-    """obs (OBS_DIM,) or (B, OBS_DIM) -> normalised steering () or (B,), same as SteeringMLP."""
+    """obs (OBS_DIM,) or (B, OBS_DIM) -> normalised actions (out_dim,) or (B, out_dim), same as SteeringMLP
+    (squeezed like SteeringMLP when out_dim is 1)."""
 
     def __init__(self, weights, biases):
         self.weights = [np.asarray(W, dtype=np.float32) for W in weights]
@@ -53,4 +54,4 @@ class NumpyPolicy:
         for i in hidden:                                   # body: Linear -> tanh
             x = np.tanh(x @ self.weights[i].T + self.biases[i])
         out = x @ self.weights[last].T + self.biases[last]  # head: Linear, no activation
-        return out[..., 0]                                  # (..., 1) -> (...), like .squeeze(-1)
+        return out[..., 0] if out.shape[-1] == 1 else out  # like SteeringMLP.forward
