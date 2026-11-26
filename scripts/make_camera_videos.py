@@ -29,8 +29,12 @@ def open_writer(path, size):
 
 
 def load_depth(path):
-    with open(path) as f:
-        a = np.array(f.read().split(), dtype=np.float32).reshape(480, 640)
+    if path.endswith(".png"):
+        # 16-bit PNG from the MS4_recordings image_recorder (lossless mm values)
+        a = cv2.imread(path, cv2.IMREAD_UNCHANGED).astype(np.float32)
+    else:
+        with open(path) as f:
+            a = np.array(f.read().split(), dtype=np.float32).reshape(480, 640)
     invalid = (a <= 0) | (a >= 65535)
     img = (np.clip(a / DEPTH_MAX, 0, 1) * 255).astype(np.uint8)
     img = cv2.applyColorMap(img, cv2.COLORMAP_TURBO)
@@ -63,11 +67,11 @@ for run in sorted(glob.glob(os.path.join(ROOT, "*run_*"))):
     if not os.path.isdir(cam):
         print(f"{name}: no camera folder, skipped")
         continue
-    for stream, pattern, loader in (
-        ("color", "*.png", cv2.imread),
-        ("depth", "*.txt", load_depth),
+    for stream, patterns, loader in (
+        ("color", ("*.png",), cv2.imread),
+        ("depth", ("*.txt", "*.png"), load_depth),  # .txt (MS3) or 16-bit .png (MS4_recordings)
     ):
-        files = glob.glob(os.path.join(cam, stream, pattern))
+        files = [f for p in patterns for f in glob.glob(os.path.join(cam, stream, p))]
         if len(files) < 2:
             print(f"{name}/{stream}: only {len(files)} frame(s), skipped")
             continue
